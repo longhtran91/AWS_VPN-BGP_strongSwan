@@ -216,7 +216,7 @@ Parameters:
     Type: AWS::EC2::Subnet::Id
 
   pPrivateSubnetId:
-    Description: Subnet ID for VPN Gateway
+    Description: Subnet ID for Private Routing
     Type: AWS::EC2::Subnet::Id
   pRTPrivate:
     Description: Route table of private subnet
