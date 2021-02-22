@@ -1,0 +1,313 @@
+Description:  Setup AWS ONPREM Environment of Highly-Available Dynamic Accelerated Site-to-Site VPN
+Parameters:
+  LatestAmiId:
+    Description: AMI for Bastion Host (default is latest AmaLinux2)
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+Resources:
+  #Setup AWS Environment
+  AWSVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.16.0.0/16
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+      Tags: 
+        - Key: Name
+          Value: AWS
+  AWSPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+        AvailabilityZone: !Select [0, !GetAZs '']
+        CidrBlock: 10.16.32.0/20
+        Tags: 
+          - Key: Name
+            Value: sn-aws-private-A
+        VpcId: !Ref AWSVPC
+  AWSPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+        AvailabilityZone: !Select [1, !GetAZs '']
+        CidrBlock: 10.16.96.0/20
+        Tags: 
+          - Key: Name
+            Value: sn-aws-private-B
+        VpcId: !Ref AWSVPC
+  CustomRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+          - Key: Name
+            Value: AWS-VPC-Default-RT
+      VpcId: !Ref AWSVPC
+  RTAssociationPrivateA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref CustomRouteTable
+      SubnetId: !Ref AWSPrivateSubnetA
+  RTAssociationPrivateB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref CustomRouteTable
+      SubnetId: !Ref AWSPrivateSubnetB
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore #policy for ec2 access via session manager
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: 
+        - !Ref EC2Role
+  SGAWSInstance:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Default AWS SG
+      SecurityGroupIngress: 
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all SSH in
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 192.168.8.0/21
+          Description: Allow all from on-premises
+          IpProtocol: -1
+      VpcId: !Ref AWSVPC
+  SGSelfReferenceRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SGAWSInstance
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref SGAWSInstance
+  EC2PrivateA:
+    Type: AWS::EC2::Instance
+    Properties: 
+      AvailabilityZone: !Select [0, !GetAZs '']
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref SGAWSInstance
+      SubnetId: !Ref AWSPrivateSubnetA
+      Tags:
+        - Key: Name
+          Value: AWS-EC2-A
+  EC2PrivateB:
+    Type: AWS::EC2::Instance
+    Properties: 
+      AvailabilityZone: !Select [1, !GetAZs '']
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - !Ref SGAWSInstance
+      SubnetId: !Ref AWSPrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: AWS-EC2-B
+  #Create these endpoints for accessing private ec2 via session manager
+  ssminterfaceendpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: True
+      SecurityGroupIds: 
+        - !Ref SGAWSInstance
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      SubnetIds: 
+        - !Ref AWSPrivateSubnetA
+        - !Ref AWSPrivateSubnetB
+      VpcEndpointType: Interface
+      VpcId: !Ref AWSVPC
+  ssmmessagesinterfaceendpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: True
+      SecurityGroupIds: 
+        - !Ref SGAWSInstance
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      SubnetIds: 
+        - !Ref AWSPrivateSubnetA
+        - !Ref AWSPrivateSubnetB
+      VpcEndpointType: Interface
+      VpcId: !Ref AWSVPC
+  ssmec2messagesinterfaceendpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: True
+      SecurityGroupIds: 
+        - !Ref SGAWSInstance
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      SubnetIds: 
+        - !Ref AWSPrivateSubnetA
+        - !Ref AWSPrivateSubnetB
+      VpcEndpointType: Interface
+      VpcId: !Ref AWSVPC
+  TGW:
+    Type: AWS::EC2::TransitGateway
+    Properties: 
+      AmazonSideAsn: 64512
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      VpnEcmpSupport: enable
+      Description: "AWSTGW"
+      DnsSupport: enable
+  TGWAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties: 
+      SubnetIds: 
+        - !Ref AWSPrivateSubnetA
+        - !Ref AWSPrivateSubnetB
+      TransitGatewayId: !Ref TGW
+      VpcId: !Ref AWSVPC
+  TGWDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: "TGWAttachment"
+    Properties:
+      TransitGatewayId: !Ref TGW
+      RouteTableId: !Ref CustomRouteTable
+      DestinationCidrBlock: 192.168.8.0/21
+
+  #Setup Simulated On-Premises Environment
+  ONPREMVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.8.0/21
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+      Tags: 
+        - Key: Name
+          Value: ONPREM_VPC
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 192.168.10.0/24
+      Tags: 
+        - Key: Name
+          Value: PrivateSubnet1
+      VpcId: !Ref ONPREMVPC
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 192.168.11.0/24
+      Tags: 
+        - Key: Name
+          Value: PrivateSubnet2
+      VpcId: !Ref ONPREMVPC
+  RTPrivate1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key: Name
+          Value: RT-Private1
+      VpcId: !Ref ONPREMVPC
+  RTPrivate2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key: Name
+          Value: RT-Private2
+      VpcId: !Ref ONPREMVPC
+  RTPrivate1Associate:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref RTPrivate1
+      SubnetId: !Ref PrivateSubnet1
+  RTPrivate2Associate:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref RTPrivate2
+      SubnetId: !Ref PrivateSubnet2
+  ONPREMInstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: SG for onprem
+      SecurityGroupIngress: 
+        - CidrIp: 10.16.0.0/16
+          Description: Allow AWS cidr range
+          IpProtocol: -1
+        - CidrIp: 192.168.8.0/21
+          Description: Allow ONPREM cidr range
+          IpProtocol: -1
+      VpcId: !Ref ONPREMVPC
+  InstanceSGSelfReference:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !Ref ONPREMInstanceSG
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref ONPREMInstanceSG
+  ONPREMSERVER1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: 
+        - !Ref ONPREMInstanceSG
+      Tags:
+        - Key: Name
+          Value: ONPREM-SERVER1
+  ONPREMSERVER2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds: 
+        - !Ref ONPREMInstanceSG
+      Tags:
+        - Key: Name
+          Value: ONPREM-SERVER2
+  #Create these endpoints for accessing private ec2 via session manager
+  ssmVPCe:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: "Interface"
+      PrivateDnsEnabled: "True"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref ONPREMInstanceSG
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcId: !Ref ONPREMVPC
+  ssmec2messagesVPCe:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: "Interface"
+      PrivateDnsEnabled: "True"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref ONPREMInstanceSG
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcId: !Ref ONPREMVPC
+  ssmmessagesVPCe:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: "Interface"
+      PrivateDnsEnabled: "True"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref ONPREMInstanceSG
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcId: !Ref ONPREMVPC
+
+
+
+
